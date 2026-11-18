@@ -14,6 +14,15 @@ import {
 
 const API_BASE = 'http://localhost:8010/api'
 
+function getTokenRole(token: string) {
+  try {
+    const payload = token.split('.')[1]
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))).role || 'user'
+  } catch {
+    return 'user'
+  }
+}
+
 function DashboardPage() {
   const [summary, setSummary] = useState<any>(null)
   const [policy, setPolicy] = useState<any>(null)
@@ -139,6 +148,7 @@ function DashboardPage() {
 
 function AdminPage() {
   const [token, setToken] = useState<string>(() => localStorage.getItem('corvo-token') || '')
+  const [role, setRole] = useState(() => getTokenRole(localStorage.getItem('corvo-token') || ''))
   const [loginForm, setLoginForm] = useState({ username: 'admin', password: 'admin123' })
   const [summary, setSummary] = useState<any>(null)
   const [users, setUsers] = useState<any[]>([])
@@ -146,19 +156,15 @@ function AdminPage() {
   const [audit, setAudit] = useState<any[]>([])
   const [approvals, setApprovals] = useState<any[]>([])
   const [error, setError] = useState('')
+  const [batchFile, setBatchFile] = useState<File | null>(null)
+  const [batchResult, setBatchResult] = useState<any>(null)
+  const [batchError, setBatchError] = useState('')
+  const [batchLoading, setBatchLoading] = useState(false)
 
   const loadAdminData = async (authToken: string) => {
     if (!authToken) return
     const headers = { Authorization: `Bearer ${authToken}` }
-    const role = (() => {
-      try {
-        const payload = authToken.split('.')[1]
-        const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
-        return decoded.role || 'user'
-      } catch {
-        return 'user'
-      }
-    })()
+    const currentRole = getTokenRole(authToken)
 
     try {
       const requests = [
@@ -166,7 +172,7 @@ function AdminPage() {
         axios.get(`${API_BASE}/admin/approvals`, { headers }),
       ]
 
-      if (role === 'admin') {
+      if (currentRole === 'admin') {
         requests.push(
           axios.get(`${API_BASE}/admin/users`, { headers }),
           axios.get(`${API_BASE}/admin/policies`, { headers }),
@@ -180,7 +186,7 @@ function AdminPage() {
       setSummary(summaryRes.data)
       setApprovals(approvalsRes.data)
 
-      if (role === 'admin') {
+      if (currentRole === 'admin') {
         const [usersRes, policiesRes, auditRes] = responses.slice(2)
         setUsers(usersRes.data)
         setPolicies(policiesRes.data)
@@ -211,6 +217,7 @@ function AdminPage() {
       const response = await axios.post(`${API_BASE}/auth/login`, loginForm)
       const nextToken = response.data.token
       setToken(nextToken)
+      setRole(response.data.user.role)
       localStorage.setItem('corvo-token', nextToken)
       setError('')
     } catch (err: any) {
@@ -220,12 +227,16 @@ function AdminPage() {
 
   function handleLogout() {
     setToken('')
+    setRole('user')
     localStorage.removeItem('corvo-token')
     setSummary(null)
     setUsers([])
     setPolicies([])
     setAudit([])
     setApprovals([])
+    setBatchFile(null)
+    setBatchResult(null)
+    setBatchError('')
   }
 
   async function handleApprovalDecision(approvalId: number, status: 'approved' | 'rejected') {
@@ -238,6 +249,37 @@ function AdminPage() {
     }
   }
 
+  async function handleBatchProcess() {
+      if (!batchFile || !token) return
+      const formData = new FormData()
+      formData.append('file', batchFile)
+      setBatchLoading(true)
+      setBatchError('')
+      setBatchResult(null)
+      try {
+        const response = await axios.post(`${API_BASE}/process-batch`, formData, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        setBatchResult(response.data)
+      } catch (err: any) {
+        setBatchError(err.response?.data?.detail || 'Batch processing failed.')
+      } finally {
+        setBatchLoading(false)
+      }
+    }
+
+  function downloadDecisionCsv() {
+      if (!batchResult?.decision_csv) return
+      const blob = new Blob([batchResult.decision_csv], { type: 'text/csv;charset=utf-8' })
+      const href = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = 'pr-decision-results.csv'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000)
+    }
   if (!token) {
     return (
       <div className="mx-auto max-w-xl rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -287,6 +329,69 @@ function AdminPage() {
         <StatCard label="Policies" value={summary?.totals?.policies ?? 0} accent="emerald" />
         <StatCard label="Audit rows" value={summary?.totals?.audit_rows ?? 0} accent="violet" />
       </section>
+
+      {role === 'admin' && (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h3 className="text-xl font-semibold text-slate-800">Process PR batch</h3>
+              <p className="mt-1 text-sm text-slate-500">Validate, club, evaluate and consolidate uploaded CSV lines.</p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(event) => setBatchFile(event.target.files?.[0] || null)}
+                className="max-w-xs rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
+              />
+              <button
+                onClick={handleBatchProcess}
+                disabled={!batchFile || batchLoading}
+                className="rounded-xl bg-cyan-700 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {batchLoading ? 'Processing…' : 'Process CSV'}
+              </button>
+            </div>
+          </div>
+          {batchError && <p className="mt-4 text-sm text-red-600">{batchError}</p>}
+          {batchResult && (
+            <div className="mt-5">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-slate-600">
+                  {batchResult.processed_rows} processed · {batchResult.not_processed_rows} not processed · {batchResult.purchase_orders_created} POs
+                </p>
+                <button onClick={downloadDecisionCsv} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
+                  Download decisions CSV
+                </button>
+              </div>
+              <div className="max-h-80 overflow-auto rounded-xl border border-slate-200">
+                <table className="min-w-full text-left text-xs text-slate-700">
+                  <thead className="sticky top-0 bg-slate-100 text-slate-500">
+                    <tr>
+                      <th className="p-2">PR / line</th>
+                      <th className="p-2">Item</th>
+                      <th className="p-2">Route</th>
+                      <th className="p-2">Decision</th>
+                      <th className="p-2">Group / PO</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {batchResult.results.map((entry: any, index: number) => (
+                      <tr key={`${entry.pr_no}-${entry.pr_line}-${index}`} className="border-t border-slate-100">
+                        <td className="p-2">{entry.pr_no}/{entry.pr_line}</td>
+                        <td className="p-2">{entry.resolved_item_code || '—'}</td>
+                        <td className="p-2">{entry.route}</td>
+                        <td className="p-2">{entry.decision}</td>
+                        <td className="p-2">{entry.group_id || '—'} / {entry.po_id || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="grid gap-6 xl:grid-cols-2">
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
+import logging
 import math
 import re
 import sqlite3
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -13,7 +16,8 @@ from typing import Any, Dict, List, Optional
 
 import jwt
 import pandas as pd
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from pypdf import PdfReader
+from fastapi import Depends, FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
@@ -43,6 +47,7 @@ CONTRACT_REGISTER = pd.read_csv(CONTRACTS_DIR / 'contract_register.csv')
 CONTRACT_LINES = pd.read_csv(CONTRACTS_DIR / 'contract_lines.csv')
 POLICY = json.loads(POLICY_FILE.read_text(encoding='utf-8'))
 security = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -152,6 +157,76 @@ def init_db() -> None:
 init_db()
 
 
+def load_pdf_only_contracts() -> tuple[pd.DataFrame, pd.DataFrame]:
+    register_rows = []
+    line_rows = []
+    known_contracts = set(CONTRACT_REGISTER['contract_id'].astype(str))
+    for pdf_path in sorted((CONTRACTS_DIR / 'pdf').glob('*.pdf')):
+        try:
+            text = '\n'.join(page.extract_text() or '' for page in PdfReader(pdf_path).pages)
+        except Exception as exc:
+            logger.warning('Could not extract contract PDF %s: %s', pdf_path.name, exc)
+            continue
+
+        contract_match = re.search(r'Contract No\.\s*(RC-[A-Z0-9-]+)', text, re.IGNORECASE)
+        if not contract_match:
+            logger.warning('Skipping contract PDF without a contract number: %s', pdf_path.name)
+            continue
+        contract_id = contract_match.group(1).upper()
+        if contract_id in known_contracts:
+            continue
+
+        supplier_match = re.search(r'Supplier ID\s+(S\d+)', text, re.IGNORECASE)
+        term_match = re.search(
+            r'valid from\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})',
+            text,
+            re.IGNORECASE,
+        )
+        ceiling_match = re.search(r'not exceed INR\s+([\d,]+(?:\.\d+)?)', text, re.IGNORECASE)
+        if not (supplier_match and term_match and ceiling_match):
+            logger.warning('Skipping contract PDF with incomplete terms: %s', pdf_path.name)
+            continue
+
+        supplier_id = supplier_match.group(1).upper()
+        supplier = get_supplier_by_id(supplier_id)
+        if supplier is None:
+            logger.warning('Skipping %s because supplier %s is absent from supplier master', contract_id, supplier_id)
+            continue
+        ceiling = float(ceiling_match.group(1).replace(',', ''))
+        register_rows.append({
+            'contract_id': contract_id,
+            'supplier_id': supplier_id,
+            'supplier_name': supplier.get('name'),
+            'start_date': term_match.group(1),
+            'end_date': term_match.group(2),
+            'value_cap': ceiling,
+            'consumed_value': 0.0,
+            'source': pdf_path.name,
+        })
+
+        schedule = re.compile(
+            r'^\s*\d+\s+(ITM-\d+)\s+(.+?)\s+(NOS|KG|PAIR|MTR|LTR|BRL|BKT|CYL|MON|JOB|QTR)\s+([\d,]+(?:\.\d+)?)\s*$',
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for line_match in schedule.finditer(text):
+            line_rows.append({
+                'contract_id': contract_id,
+                'item_code': line_match.group(1).upper(),
+                'description': line_match.group(2).strip(),
+                'uom': line_match.group(3).upper(),
+                'rate': float(line_match.group(4).replace(',', '')),
+                'source': pdf_path.name,
+            })
+        if not any(row['contract_id'] == contract_id for row in line_rows):
+            logger.warning('No readable schedule lines found in contract PDF %s', pdf_path.name)
+            register_rows.pop()
+            continue
+        known_contracts.add(contract_id)
+    if register_rows:
+        logger.info('Loaded %s PDF-only contracts with %s item rates', len(register_rows), len(line_rows))
+    return pd.DataFrame(register_rows), pd.DataFrame(line_rows)
+
+
 def norm(value: Any) -> str:
     if value is None or pd.isna(value):
         return ''
@@ -197,12 +272,10 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
 
 
 def determine_approval_role(requirement: Dict[str, Any], route: str, decision: str) -> str:
-    requirement_value = float(requirement.get('estimated_unit_price', 0) or 0) * float(requirement.get('quantity', 0) or 0)
-    if not requirement_value and route in {'EMERGENCY_PO', 'CONTRACT_PO', 'SPOT_PO'}:
-        requirement_value = float(requirement.get('requirement_value', 0) or 0)
+    requirement_value = float(requirement.get('requirement_value', 0) or 0)
     if route in {'RFP', 'EMERGENCY_PO'} or requirement_value >= 500000:
         return 'procurement_head'
-    if requirement_value >= 250000 or str(requirement.get('plant', '')).upper() in {'CHK1', 'PUN1'}:
+    if requirement_value >= 250000:
         return 'plant_manager'
     return 'buyer'
 
@@ -288,6 +361,12 @@ def get_supplier_by_id(supplier_id: Optional[str]) -> Optional[dict]:
     return row.iloc[0].to_dict()
 
 
+PDF_CONTRACT_REGISTER, PDF_CONTRACT_LINES = load_pdf_only_contracts()
+if not PDF_CONTRACT_REGISTER.empty:
+    CONTRACT_REGISTER = pd.concat([CONTRACT_REGISTER, PDF_CONTRACT_REGISTER], ignore_index=True)
+    CONTRACT_LINES = pd.concat([CONTRACT_LINES, PDF_CONTRACT_LINES], ignore_index=True)
+
+
 @lru_cache(maxsize=2048)
 def _get_active_supplier_history(item_code: str, as_of_iso: str) -> tuple:
     as_of = datetime.fromisoformat(as_of_iso)
@@ -346,6 +425,7 @@ def get_contracts_for_item(item_code: str, as_of: datetime) -> List[dict]:
                 'rate': float(row.get('rate', 0) or 0),
                 'consumed_value': float(contract.get('consumed_value', 0) or 0),
                 'value_cap': float(contract.get('value_cap', 0) or 0),
+                'source': contract.get('source', 'contract_register.csv'),
             })
     return contracts
 
@@ -354,6 +434,7 @@ def get_contracts_for_item(item_code: str, as_of: datetime) -> List[dict]:
 def _get_preferred_supplier_rank(item_code: str, as_of_iso: str) -> tuple:
     as_of = datetime.fromisoformat(as_of_iso)
     target = norm(item_code)
+    window_start = as_of - timedelta(days=548)
     candidates = []
     for _, supplier in SUPPLIER_MASTER.iterrows():
         if norm(supplier.get('status')) != 'active':
@@ -361,22 +442,36 @@ def _get_preferred_supplier_rank(item_code: str, as_of_iso: str) -> tuple:
         supplier_id = str(supplier.get('supplier_id'))
         po_rows = PO_HISTORY.loc[PO_HISTORY['item_code'].str.lower() == target].copy()
         po_rows = po_rows[po_rows['supplier_id'].astype(str).str.lower() == supplier_id.lower()]
-        po_rows = po_rows[pd.to_datetime(po_rows['po_date']) <= pd.Timestamp(as_of)]
+        po_rows['_parsed_date'] = pd.to_datetime(po_rows['po_date'], errors='coerce')
+        po_rows = po_rows[
+            (po_rows['_parsed_date'] <= pd.Timestamp(as_of))
+            & (po_rows['_parsed_date'] >= pd.Timestamp(window_start))
+        ]
         po_rows = po_rows.sort_values('po_date', ascending=False)
         latest_po = po_rows.iloc[0].to_dict() if not po_rows.empty else None
-        latest_contract = None
-        for _, contract in CONTRACT_REGISTER.iterrows():
-            if str(contract.get('supplier_id')).lower() != supplier_id.lower():
+        supplier_contracts = CONTRACT_REGISTER.loc[
+            CONTRACT_REGISTER['supplier_id'].astype(str).str.lower() == supplier_id.lower()
+        ]
+        contract_history = []
+        for _, contract in supplier_contracts.iterrows():
+            start = to_date(contract.get('start_date'))
+            if start is None or start > as_of:
                 continue
-            if to_date(contract.get('start_date')) and to_date(contract.get('start_date')) <= as_of:
-                relevant = CONTRACT_LINES.loc[CONTRACT_LINES['contract_id'] == contract['contract_id']]
-                relevant = relevant[relevant['item_code'].str.lower() == target]
-                if not relevant.empty:
-                    latest_contract = {'contract_id': contract['contract_id'], 'rate': float(relevant.iloc[0]['rate'])}
-                    break
+            relevant = CONTRACT_LINES.loc[
+                (CONTRACT_LINES['contract_id'].astype(str) == str(contract['contract_id']))
+                & (CONTRACT_LINES['item_code'].astype(str).str.lower() == target)
+            ]
+            for _, contract_line in relevant.iterrows():
+                contract_history.append({
+                    'contract_id': contract['contract_id'],
+                    'rate': float(contract_line['rate']),
+                    'start_date': start,
+                })
+        latest_contract = max(contract_history, key=lambda contract: contract['start_date']) if contract_history else None
         if latest_po is None and latest_contract is None:
             continue
-        days = (as_of - to_date(latest_po['po_date'])).days if latest_po else 3650
+        latest_po_date = to_date(latest_po['po_date']) if latest_po else None
+        days = (as_of - latest_po_date).days if latest_po_date else 3650
         if days <= 90:
             recency = 1.0
         elif days <= 365:
@@ -392,7 +487,7 @@ def _get_preferred_supplier_rank(item_code: str, as_of_iso: str) -> tuple:
             'contract': bool(latest_contract),
             'on_time_pct': float(supplier.get('on_time_pct', 0) or 0),
             'quality_rating': float(supplier.get('quality_rating', 0) or 0),
-            'reference_price': float(latest_po.get('unit_price', 0) or 0) if latest_po is not None else float(latest_contract.get('rate', 0) or 0),
+            'reference_price': float(latest_po.get('unit_price', 0) or 0) if latest_po is not None else float(latest_contract['rate']),
             'score': score,
         })
     ranked = sorted(candidates, key=lambda item: (-item['score'], -item['on_time_pct'], -item['quality_rating']))
@@ -456,147 +551,181 @@ def get_supplier_suggestions(item_code: str, as_of: datetime, required_count: in
     return suggested
 
 
-def classify_requirement_route(requirement: dict) -> str:
+def _resolve_policy_value(value: Any, policy: dict) -> Any:
+    if isinstance(value, dict) and 'limit' in value:
+        return policy.get('limits', {}).get(value['limit'])
+    return value
+
+
+def _condition_matches(condition: dict, context: dict, policy: dict) -> bool:
+    if 'all' in condition:
+        return all(_condition_matches(part, context, policy) for part in condition['all'])
+    if 'any' in condition:
+        return any(_condition_matches(part, context, policy) for part in condition['any'])
+    if 'not' in condition:
+        return not _condition_matches(condition['not'], context, policy)
+    field = condition.get('field')
+    if not field or field not in context:
+        return False
+    actual = context[field]
+    expected = _resolve_policy_value(condition.get('value'), policy)
+    operator = condition.get('operator', 'eq')
+    if operator == 'eq':
+        return actual == expected
+    if operator == 'ne':
+        return actual != expected
+    if operator == 'lt':
+        return actual < expected
+    if operator == 'lte':
+        return actual <= expected
+    if operator == 'gt':
+        return actual > expected
+    if operator == 'gte':
+        return actual >= expected
+    if operator == 'in':
+        return actual in expected
+    if operator == 'contains':
+        return expected in actual
+    return False
+
+
+def _most_recent_po_price(item_code: str, as_of: datetime, policy: dict) -> Optional[float]:
+    days = int(policy.get('history_windows', {}).get('recent_purchase_days', 365))
+    po_rows = PO_HISTORY.loc[PO_HISTORY['item_code'].astype(str).str.lower() == norm(item_code)].copy()
+    po_rows['_parsed_date'] = pd.to_datetime(po_rows['po_date'], errors='coerce')
+    po_rows = po_rows[
+        (po_rows['_parsed_date'] <= pd.Timestamp(as_of))
+        & (po_rows['_parsed_date'] >= pd.Timestamp(as_of - timedelta(days=days)))
+    ].sort_values('_parsed_date', ascending=False)
+    if po_rows.empty:
+        return None
+    return float(po_rows.iloc[0]['unit_price'])
+
+
+def evaluate_requirement(requirement: dict, policy: Optional[dict] = None) -> Dict[str, Any]:
+    active_policy = policy or POLICY
     req_date = to_date(requirement.get('created_at')) or datetime.utcnow()
     item = item_match(requirement.get('item_code'), requirement.get('description'))
     quantity = float(requirement.get('quantity', 0) or 0)
     estimated = float(requirement.get('estimated_unit_price', 0) or 0)
-    value = quantity * (estimated if estimated > 0 else (float(item.get('standard_price', 0) or 0) if item else 0))
     if item is None:
-        return 'NEW_ITEM_SOURCING'
-    if str(item.get('item_type')).lower() == 'capex':
-        return 'CAPEX_SOURCING'
-    for contract in get_contracts_for_item(str(item.get('item_code')), req_date):
-        if contract['consumed_value'] + value <= contract['value_cap']:
-            return 'CONTRACT_PO'
-    history = get_active_supplier_history(str(item.get('item_code')), req_date)
-    recent_history = [h for h in history if (req_date - h['po_date']).days <= 365]
-    emergency = str(requirement.get('urgency', '')).lower() == 'emergency'
-    if emergency and value >= float(POLICY['limits']['emergency_po_threshold']) and recent_history:
-        return 'EMERGENCY_PO'
-    if value < float(POLICY['limits']['spot_po_threshold']) and recent_history:
-        return 'SPOT_PO'
-    if value < float(POLICY['limits']['rfq_threshold']):
-        return 'RFQ'
-    return 'RFP'
-
-
-def evaluate_requirement(requirement: dict) -> Dict[str, Any]:
-    req_date = to_date(requirement.get('created_at')) or datetime.utcnow()
-    item = item_match(requirement.get('item_code'), requirement.get('description'))
-    quantity = float(requirement.get('quantity', 0) or 0)
-    estimated = float(requirement.get('estimated_unit_price', 0) or 0)
-    if item is not None:
-        quantity = float(requirement.get('quantity', 0) or 0)
-        if estimated <= 0:
-            estimated = float(item.get('standard_price', 0) or 0)
         value = quantity * estimated
+        item_code = None
+        applicable_contracts = []
+        usable_contract = None
+        unit_price = estimated
+        history = []
+        preferred = []
     else:
-        value = quantity * estimated
-    if item is None:
-        return {
-            'decision': 'SOURCING_REQUEST',
-            'route': 'NEW_ITEM_SOURCING',
-            'supplier': None,
-            'clause': '1.2',
-            'contract': None,
-            'requirement_value': value,
-            'explanation': 'No item master match was found, so the requirement is treated as a new item and sent for sourcing.',
-            'preferred_supplier': [],
-            'suggestions': [],
-        }
+        item_code = str(item['item_code'])
+        applicable_contracts = sorted(
+            get_contracts_for_item(item_code, req_date),
+            key=lambda contract: (contract['rate'], contract['contract_id']),
+        )
+        usable_contract = next(
+            (
+                contract for contract in applicable_contracts
+                if contract['consumed_value'] + quantity * contract['rate'] <= contract['value_cap']
+            ),
+            None,
+        )
+        if usable_contract is not None:
+            unit_price = usable_contract['rate']
+        elif applicable_contracts:
+            unit_price = applicable_contracts[0]['rate']
+        else:
+            unit_price = _most_recent_po_price(item_code, req_date, active_policy)
+            if unit_price is None:
+                unit_price = float(item.get('standard_price', 0) or 0)
+        value = quantity * unit_price
+        history = get_active_supplier_history(item_code, req_date)
+        recent_days = int(active_policy.get('history_windows', {}).get('recent_purchase_days', 365))
+        recent_history = [
+            row for row in history
+            if 0 <= (req_date - row['po_date']).days <= recent_days
+        ]
+        preferred = get_preferred_supplier_rank(item_code, req_date)
 
-    item_code = str(item['item_code'])
-    if str(item.get('item_type')).lower() == 'capex':
-        return {
-            'decision': 'SOURCING_REQUEST',
-            'route': 'CAPEX_SOURCING',
-            'supplier': None,
-            'clause': '5.1',
-            'contract': None,
-            'requirement_value': value,
-            'explanation': 'The item is marked Capex, which always routes to sourcing prior to contract or value checks.',
-            'preferred_supplier': get_preferred_supplier_rank(item_code, req_date)[:5],
-            'suggestions': get_supplier_suggestions(item_code, req_date, 5),
-        }
+    context = {
+        'item_missing': item is None,
+        'item_type': str(item.get('item_type', '')).lower() if item is not None else '',
+        'item_category': str(item.get('category', '')) if item is not None else '',
+        'plant': str(requirement.get('plant', '')).upper(),
+        'value': value,
+        'quantity': quantity,
+        'emergency': str(requirement.get('urgency', '')).strip().lower() == 'emergency',
+        'contract_available': usable_contract is not None,
+        'has_applicable_contract': bool(applicable_contracts),
+        'has_recent_active_supplier': bool(recent_history) if item is not None else False,
+    }
 
-    applicable_contract = None
-    for contract in sorted(get_contracts_for_item(item_code, req_date), key=lambda c: (c['rate'], c['contract_id'])):
-        projected = contract['consumed_value'] + value
-        if projected <= contract['value_cap']:
-            applicable_contract = contract
+    selected_rule = None
+    for rule in active_policy.get('rule_priority', []):
+        condition = rule.get('when')
+        if condition is None or _condition_matches(condition, context, active_policy):
+            selected_rule = rule
             break
-
-    if applicable_contract is not None:
-        return {
-            'decision': 'PO',
-            'route': 'CONTRACT_PO',
-            'supplier': applicable_contract['supplier_id'],
-            'clause': '5.2',
-            'contract': applicable_contract,
-            'requirement_value': value,
-            'explanation': f"A valid contract ({applicable_contract['contract_id']}) exists and retains enough ceiling for this requirement.",
-            'preferred_supplier': get_preferred_supplier_rank(item_code, req_date)[:5],
-            'suggestions': [],
-        }
-
-    history = get_active_supplier_history(item_code, req_date)
-    recent_history = [h for h in history if (req_date - h['po_date']).days <= 365]
-    emergency = str(requirement.get('urgency', '')).lower() == 'emergency'
-    if emergency and value >= float(POLICY['limits']['emergency_po_threshold']) and recent_history:
-        preferred = get_preferred_supplier_rank(item_code, req_date)
-        return {
-            'decision': 'PO',
-            'route': 'EMERGENCY_PO',
-            'supplier': preferred[0]['supplier_id'] if preferred else None,
-            'clause': '5.3',
-            'contract': None,
-            'requirement_value': value,
-            'explanation': 'The requirement is emergency and matches recent active purchasing history, so the first preferred supplier is used without a sourcing event.',
-            'preferred_supplier': preferred[:5],
-            'suggestions': [],
-        }
-
-    if value < float(POLICY['limits']['spot_po_threshold']) and recent_history:
-        preferred = get_preferred_supplier_rank(item_code, req_date)
-        return {
-            'decision': 'PO',
-            'route': 'SPOT_PO',
-            'supplier': preferred[0]['supplier_id'] if preferred else None,
-            'clause': '5.4',
-            'contract': None,
-            'requirement_value': value,
-            'explanation': 'The value is below the material spot-PO threshold and there is recent active supplier history for the same item.',
-            'preferred_supplier': preferred[:5],
-            'suggestions': [],
-        }
-
-    if value < float(POLICY['limits']['rfq_threshold']):
-        suggestions = get_supplier_suggestions(item_code, req_date, 3)
+    if selected_rule is None:
         return {
             'decision': 'SOURCING_REQUEST',
-            'route': 'RFQ',
+            'route': 'NOT_PROCESSED',
             'supplier': None,
-            'clause': '5.5',
+            'clause': None,
             'contract': None,
             'requirement_value': value,
-            'explanation': 'The requirement falls below INR 10,00,000 and requires an RFQ sourcing event.',
-            'preferred_supplier': get_preferred_supplier_rank(item_code, req_date)[:5],
-            'suggestions': suggestions,
+            'unit_price': unit_price,
+            'policy_version': active_policy.get('version'),
+            'explanation': 'No active policy rule matched this requirement; manual review is required.',
+            'preferred_supplier': preferred,
+            'suggestions': [],
         }
 
-    suggestions = get_supplier_suggestions(item_code, req_date, 5)
+    route = selected_rule['route']
+    supplier_strategy = selected_rule.get('supplier', 'none')
+    if supplier_strategy == 'contract_supplier' and usable_contract:
+        supplier_id = usable_contract['supplier_id']
+        suggestions = []
+        contract = usable_contract
+    elif supplier_strategy == 'first_preferred_supplier':
+        supplier_id = preferred[0]['supplier_id'] if preferred else None
+        suggestions = []
+        contract = None
+    else:
+        supplier_id = None
+        contract = None
+        match = re.fullmatch(r'suggest_(\d+)', supplier_strategy)
+        suggestions = (
+            get_supplier_suggestions(item_code, req_date, int(match.group(1)))
+            if match and item_code else []
+        )
+    if item is None:
+        suggestions = []
+    explanation = (
+        f"Policy v{active_policy.get('version', 'unknown')} clause {selected_rule.get('clause', 'n/a')} "
+        f"selected route {route} at requirement value INR {value:,.2f}."
+    )
+    if contract:
+        explanation += f" Contract {contract['contract_id']} supplies at INR {unit_price:,.2f} per unit."
+    elif item is not None:
+        explanation += f" Unit price INR {unit_price:,.2f} was selected by the policy valuation order."
     return {
-        'decision': 'SOURCING_REQUEST',
-        'route': 'RFP',
-        'supplier': None,
-        'clause': '5.6',
-        'contract': None,
+        'decision': selected_rule['decision'],
+        'route': route,
+        'supplier': supplier_id,
+        'clause': selected_rule.get('clause'),
+        'contract': contract,
         'requirement_value': value,
-        'explanation': 'The requirement reaches the RFP threshold, so a formal request-for-proposal is required.',
-        'preferred_supplier': get_preferred_supplier_rank(item_code, req_date)[:5],
+        'unit_price': unit_price,
+        'policy_version': active_policy.get('version'),
+        'item_match': item,
+        'explanation': explanation,
+        'preferred_supplier': preferred,
         'suggestions': suggestions,
     }
+
+
+def classify_requirement_route(requirement: dict) -> str:
+    return evaluate_requirement(requirement)['route']
 
 
 class IntentionInput(BaseModel):
@@ -617,6 +746,242 @@ class PurchaseRequirement(BaseModel):
     estimated_unit_price: float = 0
     need_by_date: str = '2026-11-30'
     urgency: str = 'Normal'
+
+
+DECISION_EXPORT_COLUMNS = [
+    'pr_no', 'pr_line', 'resolved_item_code', 'group_id', 'po_id', 'decision',
+    'route', 'supplier_id', 'unit_price', 'group_value_inr',
+    'suggested_supplier_ids', 'policy_version', 'reason',
+]
+REQUIRED_BATCH_COLUMNS = {
+    'pr_no', 'pr_line', 'created_at', 'requester', 'department', 'plant',
+    'item_code', 'description', 'quantity', 'uom', 'estimated_unit_price',
+    'need_by_date', 'urgency',
+}
+
+
+def _csv_number(value: Any, *, allow_empty: bool = False) -> Optional[float]:
+    if value is None or str(value).strip() == '':
+        return None if allow_empty else 0.0
+    try:
+        return float(str(value).replace(',', '').strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def process_batch_csv(content: bytes, policy: Optional[dict] = None) -> Dict[str, Any]:
+    try:
+        frame = pd.read_csv(io.BytesIO(content), dtype=str, keep_default_na=False)
+    except Exception as exc:
+        raise ValueError(f'Could not parse CSV: {exc}') from exc
+    missing_columns = sorted(REQUIRED_BATCH_COLUMNS - set(frame.columns))
+    if missing_columns:
+        raise ValueError(f'Missing required columns: {missing_columns}')
+
+    raw_rows = frame.to_dict(orient='records')
+    duplicate_keys: set[tuple[str, str]] = set()
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for row in raw_rows:
+        key = (str(row.get('pr_no', '')).strip(), str(row.get('pr_line', '')).strip())
+        counts[key] += 1
+    duplicate_keys = {key for key, count in counts.items() if count > 1}
+
+    records = []
+    for index, row in enumerate(raw_rows, start=2):
+        row_errors = []
+        pr_no = str(row.get('pr_no', '')).strip()
+        pr_line = str(row.get('pr_line', '')).strip()
+        created_at = to_date(row.get('created_at'))
+        need_by = to_date(row.get('need_by_date'))
+        quantity = _csv_number(row.get('quantity'))
+        estimated = _csv_number(row.get('estimated_unit_price'), allow_empty=True)
+        if not pr_no or not pr_line:
+            row_errors.append('pr_no and pr_line are required')
+        if (pr_no, pr_line) in duplicate_keys:
+            row_errors.append('duplicate pr_no and pr_line')
+        if created_at is None:
+            row_errors.append('created_at is invalid')
+        if need_by is None:
+            row_errors.append('need_by_date is invalid')
+        if quantity is None or quantity <= 0:
+            row_errors.append('quantity must be a positive number')
+        if estimated is None and str(row.get('estimated_unit_price', '')).strip():
+            row_errors.append('estimated_unit_price must be numeric')
+        plant = str(row.get('plant', '')).strip().upper()
+        if plant not in set(POLICY.get('plants', [])):
+            row_errors.append(f'plant {plant or "(blank)"} is not configured in the active policy')
+        if not str(row.get('description', '')).strip() and not str(row.get('item_code', '')).strip():
+            row_errors.append('item_code or description is required')
+        item = item_match(row.get('item_code'), row.get('description'))
+        if item is None and estimated is None:
+            row_errors.append('estimated_unit_price is required for a new item')
+        records.append({
+            'source_row': index,
+            'input': row,
+            'errors': row_errors,
+            'created_at': created_at,
+            'need_by': need_by,
+            'quantity': quantity,
+            'estimated_unit_price': estimated or 0.0,
+            'plant': plant,
+            'item': item,
+        })
+
+    valid_records = [record for record in records if not record['errors']]
+    valid_records.sort(key=lambda record: (
+        record['created_at'],
+        str(record['input'].get('pr_no', '')),
+        int(record['input'].get('pr_line') or 0),
+    ))
+    groups: list[dict] = []
+    for record in valid_records:
+        item_code = record['item'].get('item_code') if record['item'] else None
+        matching_group = None
+        if item_code:
+            for group in groups:
+                first = group['first']
+                if group['item_code'] != item_code or first['plant'] != record['plant']:
+                    continue
+                day_delta = (record['created_at'].date() - first['created_at'].date()).days
+                need_delta = abs((record['need_by'].date() - first['need_by'].date()).days)
+                if 0 <= day_delta <= 14 and need_delta <= 7:
+                    matching_group = group
+                    break
+        if matching_group is None:
+            matching_group = {
+                'first': record,
+                'item_code': item_code,
+                'records': [],
+            }
+            groups.append(matching_group)
+        matching_group['records'].append(record)
+
+    output_by_source_row: dict[int, dict] = {}
+    po_groups: list[dict] = []
+    for group_number, group in enumerate(groups, start=1):
+        members = group['records']
+        first_row = group['first']['input']
+        aggregate = dict(first_row)
+        aggregate['item_code'] = group['item_code'] or first_row.get('item_code')
+        aggregate['quantity'] = sum(record['quantity'] or 0 for record in members)
+        aggregate['created_at'] = group['first']['created_at'].isoformat(sep=' ')
+        aggregate['need_by_date'] = group['first']['need_by'].strftime('%Y-%m-%d')
+        aggregate['urgency'] = (
+            'Emergency'
+            if any(str(record['input'].get('urgency', '')).strip().lower() == 'emergency' for record in members)
+            else first_row.get('urgency', 'Normal')
+        )
+        evaluated = evaluate_requirement(aggregate, policy=policy)
+        group_id = f'GRP-{group_number:04d}'
+        supplier_id = evaluated.get('supplier')
+        decision = evaluated['decision']
+        route = evaluated['route']
+        reason = evaluated['explanation']
+        if route in {'CONTRACT_PO', 'EMERGENCY_PO', 'SPOT_PO'} and not supplier_id:
+            decision = 'NOT_PROCESSED'
+            route = 'NOT_PROCESSED'
+            reason += ' No eligible active supplier was available, so no PO was generated.'
+
+        po_id = None
+        if decision == 'PO':
+            eligible = next(
+                (
+                    candidate for candidate in po_groups
+                    if candidate['supplier_id'] == supplier_id
+                    and candidate['plant'] == group['first']['plant']
+                    and candidate['route'] == route
+                    and (group['first']['created_at'] - candidate['first_created_at']).total_seconds() <= 24 * 60 * 60
+                ),
+                None,
+            )
+            if eligible is None:
+                eligible = {
+                    'po_id': f'PO-{len(po_groups) + 1:04d}',
+                    'supplier_id': supplier_id,
+                    'plant': group['first']['plant'],
+                    'route': route,
+                    'first_created_at': group['first']['created_at'],
+                }
+                po_groups.append(eligible)
+            po_id = eligible['po_id']
+
+        suggested_ids = ';'.join(
+            str(suggestion['supplier_id'])
+            for suggestion in evaluated.get('suggestions', [])
+            if suggestion.get('supplier_id')
+        )
+        if decision == 'NOT_PROCESSED':
+            suggested_ids = ''
+        for record in members:
+            original = record['input']
+            output_by_source_row[record['source_row']] = {
+                'pr_no': original.get('pr_no', ''),
+                'pr_line': original.get('pr_line', ''),
+                'resolved_item_code': group['item_code'] or '',
+                'group_id': group_id,
+                'po_id': po_id or '',
+                'decision': decision,
+                'route': route,
+                'supplier_id': supplier_id or '',
+                'unit_price': evaluated.get('unit_price') or '',
+                'group_value_inr': evaluated.get('requirement_value', 0),
+                'suggested_supplier_ids': suggested_ids,
+                'policy_version': evaluated.get('policy_version') or (policy or POLICY).get('version', ''),
+                'reason': reason,
+            }
+        try:
+            record_decision_audit(
+                pr_no=str(first_row.get('pr_no', '')),
+                item_code=group['item_code'],
+                route=route,
+                decision=decision,
+                clause=str(evaluated.get('clause') or ''),
+                detail=reason,
+                created_by='batch',
+                required_role=determine_approval_role(
+                    {**aggregate, 'requirement_value': evaluated.get('requirement_value', 0)},
+                    route,
+                    decision,
+                ),
+            )
+        except sqlite3.Error:
+            logger.exception('Could not persist batch decision audit for group %s', group_id)
+            raise
+
+    for record in records:
+        if record['source_row'] in output_by_source_row:
+            continue
+        original = record['input']
+        output_by_source_row[record['source_row']] = {
+            'pr_no': original.get('pr_no', ''),
+            'pr_line': original.get('pr_line', ''),
+            'resolved_item_code': record['item'].get('item_code', '') if record['item'] else '',
+            'group_id': '',
+            'po_id': '',
+            'decision': 'NOT_PROCESSED',
+            'route': 'NOT_PROCESSED',
+            'supplier_id': '',
+            'unit_price': '',
+            'group_value_inr': '',
+            'suggested_supplier_ids': '',
+            'policy_version': (policy or POLICY).get('version', ''),
+            'reason': '; '.join(record['errors']),
+        }
+
+    results = [output_by_source_row[index] for index in range(2, len(raw_rows) + 2)]
+    export_buffer = io.StringIO(newline='')
+    writer = csv.DictWriter(export_buffer, fieldnames=DECISION_EXPORT_COLUMNS, lineterminator='\n')
+    writer.writeheader()
+    writer.writerows(results)
+    return {
+        'rows_processed': len(raw_rows),
+        'processed_rows': sum(row['decision'] != 'NOT_PROCESSED' for row in results),
+        'not_processed_rows': sum(row['decision'] == 'NOT_PROCESSED' for row in results),
+        'groups_created': len(groups),
+        'purchase_orders_created': len(po_groups),
+        'results': results,
+        'decision_csv': export_buffer.getvalue(),
+    }
 
 
 @app.get('/api/health')
@@ -798,10 +1163,9 @@ def summary() -> Dict[str, Any]:
     totals = {'PO': 0, 'SOURCING_REQUEST': 0}
     per_route = defaultdict(int)
     for _, row in batch.iterrows():
-        route = classify_requirement_route(row.to_dict())
-        decision = 'PO' if route in {'CONTRACT_PO', 'EMERGENCY_PO', 'SPOT_PO'} else 'SOURCING_REQUEST'
-        totals[decision] += 1
-        per_route[route] += 1
+        result = evaluate_requirement(row.to_dict())
+        totals[result['decision']] += 1
+        per_route[result['route']] += 1
     return {'total_lines': len(batch), 'decisions': totals, 'routes': dict(sorted(per_route.items()))}
 
 
@@ -835,7 +1199,11 @@ def evaluate_requirement_endpoint(payload: PurchaseRequirement) -> Dict[str, Any
     result = evaluate_requirement(payload.model_dump())
     item = item_match(payload.item_code, payload.description)
     result['matched_item'] = item
-    required_role = determine_approval_role(payload.model_dump(), result['route'], result['decision'])
+    required_role = determine_approval_role(
+        {**payload.model_dump(), 'requirement_value': result['requirement_value']},
+        result['route'],
+        result['decision'],
+    )
     result['required_role'] = required_role
     record_decision_audit(
         pr_no=payload.pr_no,
@@ -852,8 +1220,48 @@ def evaluate_requirement_endpoint(payload: PurchaseRequirement) -> Dict[str, Any
 
 @app.get('/api/preferred-suppliers')
 def preferred_suppliers(item_code: str, as_of: str = '2026-11-01') -> List[dict]:
-    as_of_date = to_date(as_of) or datetime(2026, 11, 1)
+    as_of_date = to_date(as_of)
+    if as_of_date is None:
+        raise HTTPException(status_code=400, detail='as_of must be a valid date.')
     return get_preferred_supplier_rank(item_code, as_of_date)
+
+
+@app.get('/api/export/supplier-rankings')
+def export_supplier_rankings(as_of: str) -> Response:
+    as_of_date = to_date(as_of)
+    if as_of_date is None:
+        raise HTTPException(status_code=400, detail='as_of must be a valid date.')
+    buffer = io.StringIO(newline='')
+    columns = ['item_code', 'rank', 'supplier_id', 'reference_price']
+    writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator='\n')
+    writer.writeheader()
+    for item_code in ITEM_MASTER['item_code'].astype(str).unique():
+        for supplier in get_preferred_supplier_rank(item_code, as_of_date)[:3]:
+            writer.writerow({
+                'item_code': item_code,
+                'rank': supplier['rank'],
+                'supplier_id': supplier['supplier_id'],
+                'reference_price': supplier['reference_price'],
+            })
+    return Response(
+        content=buffer.getvalue(),
+        media_type='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="supplier-rankings.csv"'},
+    )
+
+
+@app.post('/api/process-batch')
+async def process_batch(file: UploadFile = File(...), current_user: dict = Depends(require_admin)) -> Dict[str, Any]:
+    del current_user
+    if not file.filename or not file.filename.lower().endswith('.csv'):
+        raise HTTPException(status_code=400, detail='Only CSV files are accepted.')
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail='Uploaded CSV is empty.')
+    try:
+        return process_batch_csv(content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post('/api/upload-batch')
@@ -890,15 +1298,15 @@ def sample_decisions() -> List[Dict[str, Any]]:
     df = pd.read_csv(BATCH_DIR / 'sample_pr_batch.csv')
     results = []
     for _, row in df.head(15).iterrows():
-        route = classify_requirement_route(row.to_dict())
+        evaluation = evaluate_requirement(row.to_dict())
         results.append({
             'pr_no': row.get('pr_no'),
             'item_code': row.get('item_code'),
             'plant': row.get('plant'),
-            'route': route,
-            'decision': 'PO' if route in {'CONTRACT_PO', 'EMERGENCY_PO', 'SPOT_PO'} else 'SOURCING_REQUEST',
-            'value': float(row.get('quantity', 0) or 0) * float((row.get('estimated_unit_price') or 0) or 0),
-            'clause': 'policy evaluation',
+            'route': evaluation['route'],
+            'decision': evaluation['decision'],
+            'value': evaluation['requirement_value'],
+            'clause': evaluation['clause'],
         })
     return results
 

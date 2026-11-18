@@ -41,3 +41,9 @@ This project implements the Corvo Engineering Procurement Policy v5.0 with decis
 - If the requester supplies only free-text description with no item code and the item similarity falls below the confidence threshold, the system treats the line as an unmatched item rather than forcing a wrong match.
 - The system records route and clause under the policy condition that matched the requirement and keeps the decision explanation in the API response payload.
 - For requirement value when no contract applies and no recent PO exists, the item master standard price is used as the fallback value.
+
+## 8) Batch processing and implementation boundaries
+- The admin-only batch endpoint preserves one result per input CSV row. Invalid rows and duplicate `pr_no`/`pr_line` pairs are returned as `NOT_PROCESSED` with a reason rather than silently dropped.
+- Valid lines are evaluated as groups; rows in a consolidated PO share a group ID and PO ID. The response includes a row-level decision CSV using the endpoint's exported column order.
+- Batch decision audit and approval records are persisted to the local SQLite database. Batch persistence is not yet a single all-or-nothing transaction, so a failed batch may have persisted earlier group records.
+- SQLite persistence and the demo authentication layer are suitable only for local evaluation. PostgreSQL/SQLAlchemy/Alembic, stronger password/session security, and a policy draft/review/activation lifecycle remain production-readiness work.
