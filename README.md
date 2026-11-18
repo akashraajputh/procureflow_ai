@@ -136,5 +136,6 @@ Free-tier limitations:
 - `netlify.toml` — Netlify frontend build settings and SPA route rewrite
 - `render.yaml` — optional Render Blueprint for the backend API only
 - `frontend/src/App.tsx` — dashboard, intake UI, and admin console
+- `frontend/src/components/RouteDistributionChart.tsx` — lazily loaded dashboard chart to reduce the initial JavaScript bundle
 - `master_data/` — item, supplier, PO, and plant data
 - `DECISIONS.md` — policy assumptions and silent decisions

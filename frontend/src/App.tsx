@@ -1,19 +1,10 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom'
 import axios from 'axios'
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '')
 const API_CONFIGURED = import.meta.env.DEV || Boolean(import.meta.env.VITE_API_BASE_URL?.trim())
+const RouteDistributionChart = lazy(() => import('./components/RouteDistributionChart'))
 
 function getApiErrorMessage(error: unknown) {
   if (axios.isAxiosError(error)) {
@@ -71,7 +62,7 @@ function DashboardPage() {
   }, [])
 
   const routeChart = summary
-    ? Object.entries(summary.routes || {}).map(([name, count]) => ({ name, count }))
+    ? Object.entries(summary.routes || {}).map(([name, count]) => ({ name, count: Number(count) }))
     : []
 
   return (
@@ -109,19 +100,9 @@ function DashboardPage() {
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold text-slate-800">Route distribution</h2>
           <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={routeChart}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis allowDecimals={false} />
-                <Tooltip />
-                <Bar dataKey="count" radius={[8, 8, 0, 0]}>
-                  {routeChart.map((entry, index) => (
-                    <Cell key={`${entry.name}-${index}`} fill={['#06b6d4', '#10b981', '#f59e0b', '#8b5cf6', '#f43f5e'][index % 5]} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-slate-500">Loading chart…</div>}>
+              <RouteDistributionChart data={routeChart} />
+            </Suspense>
           </div>
         </div>
 
