@@ -85,9 +85,9 @@ Host the React/Vite frontend as a Netlify site and keep the FastAPI backend as a
    - `ADMIN_USERNAME` = `admin`
    - `ADMIN_EMAIL` = an email address you control
    - `ADMIN_PASSWORD` = a new unique password of at least 12 characters
-   - `CORS_ORIGINS` = temporary placeholder; replace with the Netlify site origin in step C
+   - `CORS_ORIGINS` = `https://procureflow-ai-zwox.netlify.app`
 6. Confirm the price shows `$0/month`, create the service, and wait for deployment.
-7. Copy the Render service URL, for example `https://corvo-procurement-api.onrender.com`. Check `https://<backend-service>.onrender.com/api/health` returns `{"status":"ok", ...}`.
+7. The current Render backend URL is `https://procureflow-ai-dl2o.onrender.com`. Check `https://procureflow-ai-dl2o.onrender.com/api/health` returns `{"status":"ok", ...}`.
 
 If Render says it cannot find `requirements.txt`, confirm it is building the latest GitHub commit, Root Directory is blank, and the repository-root `requirements.txt` exists. The root file includes `backend/requirements.txt`.
 
@@ -99,22 +99,19 @@ If Render says it cannot find `requirements.txt`, confirm it is building the lat
    - Build command: `npm ci && npm run build`
    - Publish directory: `dist`
    - SPA rewrite: `/*` → `/index.html`
-3. In the Netlify site's **Site configuration → Environment variables**, add:
-   - Key: `VITE_API_BASE_URL`
-   - Value: `https://<backend-service>.onrender.com/api` using the actual Render API URL
-   - Scope: builds (or all scopes)
-4. Trigger a deploy so the value is embedded in the built frontend. Copy the Netlify site URL, e.g. `https://your-site.netlify.app`.
+3. The root `netlify.toml` configures `VITE_API_BASE_URL` as `https://procureflow-ai-dl2o.onrender.com/api`. If you change backend services, update that value in `netlify.toml` or override it in the Netlify site's **Site configuration → Environment variables**.
+4. Trigger a deploy so the value is embedded in the built frontend. The current Netlify site URL is `https://procureflow-ai-zwox.netlify.app`.
 
 ### C. Allow Netlify to call the API
 
-1. In the Render API service's **Environment** settings, set `CORS_ORIGINS` to the exact Netlify site origin, e.g. `https://your-site.netlify.app` (no trailing slash and no `/api`).
+1. In the Render API service's **Environment** settings, set `CORS_ORIGINS` to `https://procureflow-ai-zwox.netlify.app` (no trailing slash and no `/api`).
 2. Save and wait for Render to redeploy.
 3. Open the Netlify URL, go to **Admin**, and sign in as `admin` with the `ADMIN_PASSWORD` set on Render.
 4. If API requests fail, verify the Netlify `VITE_API_BASE_URL`, Render `CORS_ORIGINS`, and both actual public URLs. Changing `VITE_API_BASE_URL` requires a new Netlify build/deploy.
 
 ### Troubleshooting a blank/white Netlify page
 
-The frontend must call the Render API, not Netlify's own `/api` path. If `VITE_API_BASE_URL` is missing from the Netlify build, `/api/...` can be rewritten to the SPA's `index.html`; the app then receives HTML instead of JSON and may fail while rendering. In the Netlify site settings, set `VITE_API_BASE_URL` to `https://<your-render-api>.onrender.com/api` and trigger **Clear cache and deploy site** (or a new deploy). Verify the Netlify deploy used the commit containing this frontend fix. The app now shows an API configuration/error notice rather than crashing on HTML responses, and a React render error fallback avoids a completely blank page.
+The frontend must call the Render API, not Netlify's own `/api` path. If `VITE_API_BASE_URL` is missing from the Netlify build, `/api/...` can be rewritten to the SPA's `index.html`; the app then receives HTML instead of JSON and may fail while rendering. The root `netlify.toml` sets the API URL to `https://procureflow-ai-dl2o.onrender.com/api`; if using another backend, update that value and trigger **Clear cache and deploy site** (or a new deploy). Verify the Netlify deploy used the commit containing this configuration. The app now shows an API configuration/error notice rather than crashing on HTML responses, and a React render error fallback avoids a completely blank page.
 
 The root `render.yaml` is now backend-only for an optional Render Blueprint; it no longer creates a Render-hosted frontend. For the split deployment above, create the Render Web Service and Netlify site separately.
 
