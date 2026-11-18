@@ -13,6 +13,17 @@ import {
 } from 'recharts'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '')
+const API_CONFIGURED = import.meta.env.DEV || Boolean(import.meta.env.VITE_API_BASE_URL?.trim())
+
+function getApiErrorMessage(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    if (error.response?.status === 404 || typeof error.response?.data === 'string') {
+      return 'The API URL is incorrect or returned a web page instead of API data. Check VITE_API_BASE_URL in Netlify and redeploy.'
+    }
+    return error.response?.data?.detail || 'The API is unavailable. It may be starting after an idle period; please try again shortly.'
+  }
+  return error instanceof Error ? error.message : 'The API could not be reached.'
+}
 
 function getTokenRole(token: string) {
   try {
@@ -28,19 +39,35 @@ function DashboardPage() {
   const [policy, setPolicy] = useState<any>(null)
   const [sampleDecisions, setSampleDecisions] = useState<any[]>([])
   const [supplierList, setSupplierList] = useState<any[]>([])
+  const [dashboardError, setDashboardError] = useState('')
+  const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
+    if (!API_CONFIGURED) {
+      setIsLoading(false)
+      return
+    }
+
     Promise.all([
       axios.get(`${API_BASE}/summary`),
       axios.get(`${API_BASE}/policy`),
       axios.get(`${API_BASE}/sample-decisions`),
       axios.get(`${API_BASE}/preferred-suppliers?item_code=ITM-1048&as_of=2026-11-01`),
     ]).then(([summaryRes, policyRes, decisionsRes, suppliersRes]) => {
+      if (
+        !summaryRes.data || typeof summaryRes.data !== 'object'
+        || !policyRes.data || typeof policyRes.data !== 'object'
+        || !Array.isArray(decisionsRes.data)
+        || !Array.isArray(suppliersRes.data)
+      ) {
+        throw new Error('Backend returned a web page instead of the expected API response. Check VITE_API_BASE_URL in Netlify.')
+      }
       setSummary(summaryRes.data)
       setPolicy(policyRes.data)
       setSampleDecisions(decisionsRes.data)
       setSupplierList(suppliersRes.data)
-    })
+    }).catch((error: unknown) => setDashboardError(getApiErrorMessage(error)))
+      .finally(() => setIsLoading(false))
   }, [])
 
   const routeChart = summary
@@ -49,6 +76,16 @@ function DashboardPage() {
 
   return (
     <div className="space-y-8">
+      {dashboardError && (
+        <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+          {dashboardError}
+        </div>
+      )}
+      {isLoading && (
+        <div role="status" className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-900">
+          Loading procurement data. The free backend may need a moment to wake up.
+        </div>
+      )}
       <header className="rounded-3xl bg-slate-900 p-6 text-white shadow-xl">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
@@ -163,6 +200,10 @@ function AdminPage() {
 
   const loadAdminData = async (authToken: string) => {
     if (!authToken) return
+    if (!API_CONFIGURED) {
+      setError('Backend API is not configured. Set VITE_API_BASE_URL in Netlify to your backend URL ending in /api, then redeploy the site.')
+      return
+    }
     const headers = { Authorization: `Bearer ${authToken}` }
     const currentRole = getTokenRole(authToken)
 
@@ -183,11 +224,17 @@ function AdminPage() {
       const responses = await Promise.all(requests)
       const summaryRes = responses[0]
       const approvalsRes = responses[1]
+      if (!Array.isArray(approvalsRes.data)) {
+        throw new Error('Backend returned an invalid approvals response. Check the API URL configured in Netlify.')
+      }
       setSummary(summaryRes.data)
       setApprovals(approvalsRes.data)
 
       if (currentRole === 'admin') {
         const [usersRes, policiesRes, auditRes] = responses.slice(2)
+        if (!Array.isArray(usersRes.data) || !Array.isArray(policiesRes.data) || !Array.isArray(auditRes.data)) {
+          throw new Error('Backend returned an invalid admin response. Check the API URL configured in Netlify.')
+        }
         setUsers(usersRes.data)
         setPolicies(policiesRes.data)
         setAudit(auditRes.data)
@@ -197,7 +244,7 @@ function AdminPage() {
         setAudit([])
       }
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Unable to load admin data.')
+      setError(getApiErrorMessage(err) || 'Unable to load admin data.')
       if (err.response?.status === 401) {
         setToken('')
         localStorage.removeItem('corvo-token')
@@ -213,6 +260,10 @@ function AdminPage() {
 
   async function handleLogin(event: React.FormEvent) {
     event.preventDefault()
+    if (!API_CONFIGURED) {
+      setError('Backend API is not configured. Set VITE_API_BASE_URL in Netlify to your backend URL ending in /api, then redeploy the site.')
+      return
+    }
     try {
       const response = await axios.post(`${API_BASE}/auth/login`, loginForm)
       const nextToken = response.data.token
@@ -221,7 +272,7 @@ function AdminPage() {
       localStorage.setItem('corvo-token', nextToken)
       setError('')
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed.')
+      setError(getApiErrorMessage(err) || 'Login failed.')
     }
   }
 
@@ -588,12 +639,25 @@ function ChatPage() {
 
 function PolicyPage() {
   const [policy, setPolicy] = useState<any>(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    axios.get(`${API_BASE}/policy`).then((res) => setPolicy(res.data))
+    if (!API_CONFIGURED) {
+      setError('Backend API is not configured. Set VITE_API_BASE_URL in Netlify to your backend URL ending in /api, then redeploy the site.')
+      return
+    }
+    axios.get(`${API_BASE}/policy`)
+      .then((res) => {
+        if (!res.data || typeof res.data !== 'object' || Array.isArray(res.data)) {
+          throw new Error('Backend returned an invalid policy response. Check the API URL configured in Netlify.')
+        }
+        setPolicy(res.data)
+      })
+      .catch((requestError: unknown) => setError(getApiErrorMessage(requestError)))
   }, [])
 
-  if (!policy) return <div className="rounded-3xl bg-white p-6 text-slate-700">Loading policy…</div>
+  if (error) return <div role="alert" className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">{error}</div>
+  if (!policy) return <div role="status" className="rounded-3xl bg-white p-6 text-slate-700">Loading policy…</div>
 
   return (
     <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
@@ -604,7 +668,7 @@ function PolicyPage() {
           <li><strong>Version:</strong> {policy.version}</li>
           <li><strong>Effective date:</strong> {policy.effective_date}</li>
           <li><strong>Owner:</strong> {policy.owner}</li>
-          <li><strong>Applied plants:</strong> {policy.plants.join(', ')}</li>
+          <li><strong>Applied plants:</strong> {Array.isArray(policy.plants) ? policy.plants.join(', ') : 'Not specified'}</li>
         </ul>
       </div>
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -661,6 +725,11 @@ function App() {
     <BrowserRouter>
       <div className="min-h-screen bg-slate-100 text-slate-900">
         <div className="mx-auto max-w-7xl px-4 py-8">
+          {!API_CONFIGURED && (
+            <div role="alert" className="mb-4 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+              Backend API URL is missing. In Netlify, set <code className="font-semibold">VITE_API_BASE_URL</code> to your backend URL ending in <code className="font-semibold">/api</code>, then redeploy.
+            </div>
+          )}
           <nav className="mb-8 flex flex-wrap gap-3 rounded-2xl bg-white p-3 shadow-sm ring-1 ring-slate-200">
             <NavLink to="/" className={({ isActive }) => `rounded-xl px-4 py-2 text-sm font-medium ${isActive ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
               Dashboard

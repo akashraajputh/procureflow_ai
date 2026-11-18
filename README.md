@@ -112,6 +112,10 @@ If Render says it cannot find `requirements.txt`, confirm it is building the lat
 3. Open the Netlify URL, go to **Admin**, and sign in as `admin` with the `ADMIN_PASSWORD` set on Render.
 4. If API requests fail, verify the Netlify `VITE_API_BASE_URL`, Render `CORS_ORIGINS`, and both actual public URLs. Changing `VITE_API_BASE_URL` requires a new Netlify build/deploy.
 
+### Troubleshooting a blank/white Netlify page
+
+The frontend must call the Render API, not Netlify's own `/api` path. If `VITE_API_BASE_URL` is missing from the Netlify build, `/api/...` can be rewritten to the SPA's `index.html`; the app then receives HTML instead of JSON and may fail while rendering. In the Netlify site settings, set `VITE_API_BASE_URL` to `https://<your-render-api>.onrender.com/api` and trigger **Clear cache and deploy site** (or a new deploy). Verify the Netlify deploy used the commit containing this frontend fix. The app now shows an API configuration/error notice rather than crashing on HTML responses, and a React render error fallback avoids a completely blank page.
+
 The root `render.yaml` is now backend-only for an optional Render Blueprint; it no longer creates a Render-hosted frontend. For the split deployment above, create the Render Web Service and Netlify site separately.
 
 Production deployment changes in this project:
