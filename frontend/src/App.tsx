@@ -12,7 +12,7 @@ import {
   YAxis,
 } from 'recharts'
 
-const API_BASE = 'http://localhost:8010/api'
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '')
 
 function getTokenRole(token: string) {
   try {

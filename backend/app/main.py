@@ -5,12 +5,16 @@ import csv
 import io
 import logging
 import math
+import base64
+import hashlib
+import hmac
+import os
 import re
+import secrets
 import sqlite3
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,13 +32,31 @@ DATA_DIR = ROOT_DIR / 'master_data'
 CONTRACTS_DIR = ROOT_DIR / 'contracts'
 BATCH_DIR = ROOT_DIR / 'pr_batches'
 POLICY_FILE = BASE_DIR / 'config' / 'procurement_policy_v5.json'
-DB_PATH = BASE_DIR / 'procurement.db'
-SECRET_KEY = 'corvo-local-dev-secret-change-in-production'
+APP_ENV = os.getenv('APP_ENV', 'development').strip().lower()
+IS_PRODUCTION = APP_ENV == 'production'
+DB_PATH = Path(os.getenv('DATABASE_PATH', str(BASE_DIR / 'procurement.db')))
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+SECRET_KEY = os.getenv('SECRET_KEY', '')
+if not SECRET_KEY and IS_PRODUCTION:
+    raise RuntimeError('SECRET_KEY must be configured in production.')
+if not SECRET_KEY:
+    SECRET_KEY = 'corvo-local-dev-secret-change-in-production'
+
+configured_origins = os.getenv('CORS_ORIGINS', '')
+if IS_PRODUCTION and not configured_origins.strip():
+    raise RuntimeError('CORS_ORIGINS must contain the deployed frontend origin in production.')
+allowed_origins = [
+    origin.strip().rstrip('/')
+    for origin in configured_origins.split(',')
+    if origin.strip()
+]
+if not allowed_origins and not IS_PRODUCTION:
+    allowed_origins = ['http://localhost:4173', 'http://127.0.0.1:4173']
 
 app = FastAPI(title='Corvo Procurement Automation API')
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
@@ -54,6 +76,34 @@ def get_db_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 600_000)
+    salt_text = base64.urlsafe_b64encode(salt).decode('ascii')
+    digest_text = base64.urlsafe_b64encode(digest).decode('ascii')
+    return f'pbkdf2_sha256$600000${salt_text}${digest_text}'
+
+
+def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
+    if stored_hash.startswith('pbkdf2_sha256$'):
+        try:
+            _, iterations, salt_text, digest_text = stored_hash.split('$', 3)
+            salt = base64.urlsafe_b64decode(salt_text)
+            expected = base64.urlsafe_b64decode(digest_text)
+            actual = hashlib.pbkdf2_hmac(
+                'sha256', password.encode('utf-8'), salt, int(iterations)
+            )
+            return hmac.compare_digest(actual, expected), False
+        except (ValueError, TypeError):
+            return False, False
+
+    # Existing local/demo databases used unsalted SHA-256; upgrade it at login.
+    legacy_digest = hashlib.sha256(password.encode('utf-8')).hexdigest()
+    if hmac.compare_digest(legacy_digest, stored_hash):
+        return True, True
+    return False, False
 
 
 def init_db() -> None:
@@ -125,20 +175,39 @@ def init_db() -> None:
             conn.execute('UPDATE approval_queue SET required_role = "buyer" WHERE required_role IS NULL')
         conn.commit()
 
-    with get_db_connection() as conn:
-        for username, email, password, role in [
-            ('admin', 'admin@corvo.local', 'admin123', 'admin'),
-            ('procurement_head', 'procurement.head@corvo.local', 'proc123', 'procurement_head'),
-            ('plant_manager', 'plant.manager@corvo.local', 'plant123', 'plant_manager'),
-            ('buyer', 'buyer@corvo.local', 'buyer123', 'buyer'),
-        ]:
-            existing = conn.execute('SELECT COUNT(*) FROM users WHERE username = ?', (username,)).fetchone()
-            if existing[0] == 0:
+    if IS_PRODUCTION:
+        admin_password = os.getenv('ADMIN_PASSWORD', '')
+        if len(admin_password) < 12:
+            raise RuntimeError('ADMIN_PASSWORD must be configured with at least 12 characters in production.')
+        admin_username = os.getenv('ADMIN_USERNAME', 'admin').strip()
+        admin_email = os.getenv('ADMIN_EMAIL', 'admin@example.invalid').strip()
+        with get_db_connection() as conn:
+            existing = conn.execute(
+                'SELECT COUNT(*) FROM users WHERE username = ?', (admin_username,)
+            ).fetchone()[0]
+            if existing == 0:
                 conn.execute(
                     'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)',
-                    (username, email, sha256(password.encode('utf-8')).hexdigest(), role),
+                    (admin_username, admin_email, hash_password(admin_password), 'admin'),
                 )
+            conn.commit()
+    else:
+        with get_db_connection() as conn:
+            for username, email, password, role in [
+                ('admin', 'admin@corvo.local', 'admin123', 'admin'),
+                ('procurement_head', 'procurement.head@corvo.local', 'proc123', 'procurement_head'),
+                ('plant_manager', 'plant.manager@corvo.local', 'plant123', 'plant_manager'),
+                ('buyer', 'buyer@corvo.local', 'buyer123', 'buyer'),
+            ]:
+                existing = conn.execute('SELECT COUNT(*) FROM users WHERE username = ?', (username,)).fetchone()
+                if existing[0] == 0:
+                    conn.execute(
+                        'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)',
+                        (username, email, hash_password(password), role),
+                    )
+            conn.commit()
 
+    with get_db_connection() as conn:
         policy_count = conn.execute('SELECT COUNT(*) FROM policy_history').fetchone()[0]
         if policy_count == 0:
             conn.execute(
@@ -251,7 +320,12 @@ def to_date(value: Any) -> Optional[datetime]:
 
 
 def create_token(user_id: int, username: str, role: str) -> str:
-    payload = {'sub': username, 'role': role, 'user_id': user_id}
+    payload = {
+        'sub': username,
+        'role': role,
+        'user_id': user_id,
+        'exp': datetime.now(timezone.utc) + timedelta(hours=24),
+    }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 
 
@@ -1003,12 +1077,22 @@ def policy() -> Dict[str, Any]:
 @app.post('/api/auth/login')
 def login(payload: LoginInput) -> Dict[str, Any]:
     username = payload.username.strip()
-    password_hash = sha256(payload.password.encode('utf-8')).hexdigest()
     with get_db_connection() as conn:
         user_row = conn.execute(
-            'SELECT id, username, email, role FROM users WHERE (username = ? OR email = ?) AND password_hash = ?',
-            (username, username, password_hash),
+            'SELECT id, username, email, role, password_hash FROM users WHERE username = ? OR email = ?',
+            (username, username),
         ).fetchone()
+        if user_row is None:
+            raise HTTPException(status_code=401, detail='Invalid username or password.')
+        password_matches, needs_rehash = verify_password(payload.password, user_row['password_hash'])
+        if not password_matches:
+            raise HTTPException(status_code=401, detail='Invalid username or password.')
+        if needs_rehash:
+            conn.execute(
+                'UPDATE users SET password_hash = ? WHERE id = ?',
+                (hash_password(payload.password), user_row['id']),
+            )
+            conn.commit()
     if user_row is None:
         raise HTTPException(status_code=401, detail='Invalid username or password.')
     token = create_token(user_row['id'], user_row['username'], user_row['role'])
@@ -1065,7 +1149,7 @@ def create_user(payload: UserCreateInput, current_user: dict = Depends(require_a
     email = payload.email.strip()
     if not username or not email or not payload.password:
         raise HTTPException(status_code=400, detail='Username, email, and password are required.')
-    password_hash = sha256(payload.password.encode('utf-8')).hexdigest()
+    password_hash = hash_password(payload.password)
     with get_db_connection() as conn:
         try:
             cursor = conn.execute(

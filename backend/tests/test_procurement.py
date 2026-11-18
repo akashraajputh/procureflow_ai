@@ -2,6 +2,7 @@ import csv
 import io
 from copy import deepcopy
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 import sys
 
@@ -41,6 +42,15 @@ def csv_bytes(rows):
     writer.writeheader()
     writer.writerows(rows)
     return buffer.getvalue().encode()
+
+
+def test_password_hash_is_salted_and_legacy_hashes_are_upgraded():
+    stored_hash = main.hash_password('correct horse battery staple')
+    assert stored_hash != main.hash_password('correct horse battery staple')
+    assert main.verify_password('correct horse battery staple', stored_hash) == (True, False)
+    assert main.verify_password('incorrect password', stored_hash) == (False, False)
+    legacy_hash = sha256(b'legacy password').hexdigest()
+    assert main.verify_password('legacy password', legacy_hash) == (True, True)
 
 
 def test_worked_example_contract_uses_contract_rate():
