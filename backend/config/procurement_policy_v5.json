@@ -1,0 +1,22 @@
+{
+  "document": "CORVO-PROC-POL-04",
+  "version": "5.0",
+  "effective_date": "2026-04-01",
+  "owner": "Head of Procurement",
+  "plants": ["PUN1", "CHK1"],
+  "limits": {
+    "emergency_po_threshold": 500000,
+    "spot_po_threshold": 200000,
+    "rfq_threshold": 1000000,
+    "rfp_threshold": 1000000
+  },
+  "rule_priority": [
+    {"id": "capex", "condition": "item_type == 'Capex'", "decision": "PO", "route": "CAPEX_SOURCING", "clause": "5.1", "supplier": "suggest_5"},
+    {"id": "contract", "condition": "contract_applies", "decision": "PO", "route": "CONTRACT_PO", "clause": "5.2", "supplier": "contract_supplier"},
+    {"id": "emergency", "condition": "emergency and value >= 500000 and has_recent_active_supplier", "decision": "PO", "route": "EMERGENCY_PO", "clause": "5.3", "supplier": "first_preferred_supplier"},
+    {"id": "spot", "condition": "value < 200000 and has_recent_active_supplier", "decision": "PO", "route": "SPOT_PO", "clause": "5.4", "supplier": "first_preferred_supplier"},
+    {"id": "rfq", "condition": "value < 1000000", "decision": "SOURCING_REQUEST", "route": "RFQ", "clause": "5.5", "supplier": "suggest_3"},
+    {"id": "rfp", "condition": "value >= 1000000", "decision": "SOURCING_REQUEST", "route": "RFP", "clause": "5.6", "supplier": "suggest_5"},
+    {"id": "new_item", "condition": "item_missing", "decision": "SOURCING_REQUEST", "route": "NEW_ITEM_SOURCING", "clause": "1.2", "supplier": "none"}
+  ]
+}

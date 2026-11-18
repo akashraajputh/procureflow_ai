@@ -1,0 +1,18 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8010
+    ports:
+      - '8010:8010'
+    working_dir: /app
+
+  frontend:
+    build:
+      context: ./frontend
+    command: npm run dev -- --host 0.0.0.0 --port 4173
+    ports:
+      - '4173:4173'
+    working_dir: /app

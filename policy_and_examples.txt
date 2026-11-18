@@ -1,0 +1,405 @@
+=== Corvo_Procurement_Policy.pdf ===
+--- page 1 ---
+Corvo Engineering Pvt Ltd: Procurement Policy PR to
+PO
+Document CORVOPROCPOL04 · Version 5.0 · Effective 1 April 2026 · Owner: Head of Procurement · Applies to
+plants PUN1 Bhosari) and CHK1 Chakan)
+This policy decides what happens to every purchase requisition (PR) line raised in Corvo: whether Procurement
+may place a purchase order (PO) directly, or must first run a sourcing event to get quotes. All values are in INR,
+excluding GST.
+1. Identifying the item
+1.1 Every PR line must be matched to an item in the item master. If the requester gave an item code, use it. If
+not, match the description to the item master (requesters often use short forms, e.g. "brg 6205 2rs" for Ball
+bearing 6205-2RS).
+1.2 A line that matches no item master item is a new item. It always goes to sourcing (route
+NEW_ITEM_SOURCING ), is never clubbed with other lines, and is valued at quantity × the requester's
+estimated unit price.
+2. Clubbing requirements (no splitting)
+2.1 Splitting a requirement into several small PRs to stay under a limit is not allowed. Procurement must
+therefore treat similar PR lines as one requirement and apply every limit in this policy to the requirement's
+total value.
+2.2 Take PR lines in order of creation time (then PR number, then line number). A line joins an existing
+requirement when it is for the same item, for the same plant, was created within 14 calendar days of the
+requirement's first line, and its need-by date is within 7 days (either side) of the first line's need-by date.
+Otherwise it starts a new requirement. If it could join more than one, it joins the earliest.
+2.3 The requirement date is the creation date of its first line. Contract validity and purchase history are
+checked as of this date. If any line in the requirement is marked Emergency, the requirement is an
+emergency.
+3. Valuing a requirement
+3.1 Requirement value = total quantity × unit price, where the unit price is the first of: (a) the rate of the
+contract that will be used (4.3), or, if every applicable contract is out of ceiling, the lowest applicable
+contract rate; (b) the price on the most recent PO for the item in the 365 days before the requirement date;
+(c) the item master standard price.
+4. Contracts
+4.1 A rate contract applies to a requirement if the contract covers the item, the requirement date falls between
+the contract's start and end dates (inclusive), and the contract supplier is Active in the supplier master.
+4.2 A contract can be used only while it has ceiling left: consumed value + this requirement's value (at the
+contract rate) must not exceed the contract value ceiling. Requirements consume ceiling in order of
+Corvo Engineering · Procurement Policy v5.0 · page 1 of 3
+
+--- page 2 ---
+requirement date. Consumed values in the register are as at its last update; contracts signed after that update
+start at zero.
+4.3 If more than one contract applies, use the one with the lowest rate that still has enough ceiling.
+4.4 The contract register is updated monthly. Contracts signed after the last update exist only as signed PDF
+copies, and are binding from their start date.
+5. Decision rules
+Apply the rules in this order. The first rule that fits decides the outcome.
+# When Outcome Route Supplier and price
+5.1 The item type is Capex Sourcing
+request
+CAPEX_SOURCING Suggest 5 suppliers
+6.4. Needs capex
+approval.
+5.2 A contract can be used 4.1 to 4.3 PO CONTRACT_PO Contract supplier at
+contract rate
+5.3 Emergency, value  ₹5,00,000, and the
+item was bought from an Active supplier in
+the last 365 days
+PO EMERGENCY_PO 1st preferred supplier
+(section 6 at its
+reference price
+5.4 Value below ₹2,00,000, and the item was
+bought from an Active supplier in the last
+365 days
+PO SPOT_PO 1st preferred supplier at
+its reference price
+5.5 Value below ₹10,00,000 (including small
+items never bought in the last 365 days)
+Sourcing
+request
+RFQ Suggest 3 suppliers 6.4
+5.6 Value ₹10,00,000 or more Sourcing
+request
+RFP Suggest 5 suppliers 6.4
+5.7 Blocked or Inactive suppliers must never receive a PO or be suggested for a sourcing event.
+6. Preferred supplier list
+Procurement keeps a preferred supplier list for every item, built automatically from purchase history and contracts
+and recalculated as of each requirement date.
+6.1 Who is on the list: every Active supplier that has either (a) at least one PO for the item in the 548 days
+before the date, or (b) a contract covering the item that started on or before the date (even if it has since
+expired).
+6.2 Ranking: rank the suppliers on the list so that the best choice for a direct PO comes first. Procurement looks
+at: how often we have bought the item from them, how recently, whether they have held a contract for the
+item, and their on-time delivery and quality record. Procurement leaves the exact weighting to the system
+design, but it must be consistent, explainable to a buyer, and recorded. The top supplier is the 1st preferred
+supplier.
+6.3 Reference price: the price on that supplier's most recent PO for the item in the 548 days; if it has none, the
+rate in its most recent contract for the item.
+Corvo Engineering · Procurement Policy v5.0 · page 2 of 3
+
+--- page 3 ---
+6.4 Suggesting suppliers for sourcing: take the preferred list in order. If it has fewer suppliers than needed (3
+or 5), add other Active suppliers that list the item's category in the supplier master, best delivery and quality
+record first. New items get no suggestions: the buyer finds suppliers.
+7. Placing purchase orders (consolidation)
+7.1 To reduce the number of POs, requirements that end in a PO are combined into one PO with several lines
+when they have the same supplier, the same plant and the same route, and were raised within 24 hours
+of the first requirement on that PO (measured from the creation time of each requirement's first line).
+7.2 Take requirements in order of creation time. A requirement joins the earliest open PO it qualifies for;
+otherwise it starts a new PO. Sourcing requests are never combined.
+8. Record keeping
+8.1 Every decision must record the policy clause applied, and the contract or PO it relied on. A buyer may
+override a decision only with a written reason, which is kept with the original decision.
+Corvo Engineering · Procurement Policy v5.0 · page 3 of 3
+
+=== Worked_Examples.pdf ===
+--- page 1 ---
+Worked examples
+Corvo Engineering · sample PR batch · policy version 5.0 · supplier and contract details are in the master
+data
+These examples show how the policy applies to real lines from sample_pr_batch.csv. There is no full
+answer key: use these to check your understanding, then reason from the policy for everything else. Where
+the policy is silent, decide yourself and record the decision in DECISIONS.md.
+Decisions
+1. Contract PO
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00019/1
+20261104
+1240
+PUN1 ITM1002 MS sheet 3mm
+12502500
+15
+NOS
+202611
+15
+Normal
+Decision: CONTRACT_PO · supplier S001 Bhosari Steel Traders) at ₹9,169 · requirement value
+₹1,37,531 · PO0011
+The item is covered by rate contract RC2025011 with Bhosari Steel Traders, valid on the requirement
+date, supplier Active, and the ceiling has room 4.1, 4.2. Rule 5.2 applies before any value limit, so it is a
+PO at the contract rate, whatever the value.
+2. Contract that exists only as a PDF
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00045/1
+20261118
+1050
+CHK1 ITM1037 Solenoid valve 5/2 1/4
+inch
+11
+NOS
+202612
+13
+Normal
+Decision: CONTRACT_PO · supplier S021 Pneumatic Point) at ₹2,439 · requirement value ₹26,829 ·
+PO0072
+RC2026031 is not in the contract register (last updated 31 Oct). It exists only as a signed PDF in
+contracts/pdf, valid from 20261115. The requirement date is after that, so the contract applies 4.4.
+3. Contract ceiling nearly used up
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00004/1
+20261102
+1515
+CHK1 (none) brg 6308 ZZ for
+maintenance
+210
+NOS
+202611
+26
+Normal
+PR26
+00026/1
+20261102
+1520
+CHK1 ITM1022 Ball bearing 6308ZZ 170
+NOS
+202611
+23
+Normal
+Decision: RFQ · suggested: S014, S013, S016 · requirement value ₹2,20,256
+Bearings are on contract RC2026002, but only about ₹38,000 of its ₹12 lakh ceiling is left. This
+requirement would exceed it 4.2, so the contract cannot be used. The requirement is valued at the
+lowest applicable contract rate 3.1 and the rest of the rules decide.
+Corvo Engineering · Worked examples · page 1 of 5
+
+--- page 2 ---
+4. Two contracts for the same item
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00034/1
+20261102
+1405
+PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+3920
+NOS
+202611
+25
+Normal
+PR26
+00032/1
+20261109 1810 PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+690 NOS 202611
+29
+Normal
+Decision: CONTRACT_PO · supplier S007 Precision Fasteners Co) at ₹7 · requirement value ₹32,547 ·
+PO0003
+Hex bolts are on two contracts. RC2026015 Unbrako) has the lower rate but its ceiling is almost used
+up, so the policy takes the lowest-rate contract that still has room 4.3 RC2026013 Precision
+Fasteners).
+5. Split PRs clubbed into one requirement
+PR / line Created Plant Item code Description Qty Need by Urgency
+PR2600146/1 20261102 0940 CHK1 ITM1038 Hydraulic oil HLP 68 270 LTR 20261119 Normal
+PR2600144/1 20261103 0930 CHK1 ITM1038 Hydraulic oil HLP 68 190 LTR 20261115 Normal
+PR2600145/1 20261105 0840 CHK1 ITM1038 Hydraulic oil HLP 68 300 LTR 20261121 Normal
+Decision: SPOT_PO · supplier S024 Janatics Dealer Chakan) at ₹166 · requirement value ₹1,26,472 ·
+PO0001
+3 separate PRs for the same item and plant, raised within 14 days with need-by dates within 7 days of
+each other, are one requirement 2.2. The limits apply to the total of ₹1,26,472, not to each PR 2.1.
+6. Same item, but not clubbed
+PR / line Created Plant Item code Description Qty Need by Urgency
+PR2600106/1 20261102 1200 PUN1 ITM1044 VCI bag 600900 7370 NOS 20270219 Normal
+PR2600103/1 20261105 0850 CHK1 (none) vci bag 600900 6480 NOS 20270304 Normal
+Decision: SPOT_PO · supplier S027 Vardhman Packaging) at ₹22 · requirement value ₹1,56,170 · PO
+0002
+Same item, raised a few days apart, but for different plants, so they are separate requirements 2.2,
+each judged on its own value. Each row's decision is shown in the scoring format as two requirements.)
+Corvo Engineering · Worked examples · page 2 of 5
+
+--- page 3 ---
+7. Free-text item matched
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00088/1
+20261106
+1500
+PUN1 (none) hyd hose 1/2 inch 2
+wire
+250
+MTR
+202611
+28
+Normal
+Decision: SPOT_PO · supplier S023 Hydrax Hydraulics) at ₹392 · requirement value ₹97,955 · PO
+0023
+The requester typed "hyd hose 1/2 inch 2 wire" with no item code. It matches item ITM1035 Hydraulic
+hose 1/2 inch 2 wire) (1.1. No contract, value below ₹2 lakh and bought in the last year, so it is a spot PO
+to the 1st preferred supplier 5.4.
+8. Emergency PO
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00059/1
+20261106
+1850
+PUN1 ITM
+1026
+Gearbox oil seal
+45628
+2380
+NOS
+202611
+25
+Emergency
+Decision: EMERGENCY_PO · supplier S014 Mahalaxmi Machine Spares) at ₹106 · requirement value
+₹2,53,184 · PO0024
+Marked Emergency, worth ₹2,53,184 (at or below ₹5 lakh), with purchase history, so rule 5.3 allows a PO
+to the 1st preferred supplier without quotes, although it is above the normal ₹2 lakh limit.
+9. RFQ above the PO limit
+PR / line Created Plant Item code Description Qty Need by Urgency
+PR2600089/1 20261105 1840 PUN1 (none) CMM calibration service 5 JOB 20261130 Normal
+Decision: RFQ · suggested: S043, S044, S042 · requirement value ₹3,36,562
+No contract, and worth ₹3,36,562, which is at or above ₹2 lakh and below ₹10 lakh, so quotes are
+needed 5.5. The three suggested suppliers are the top of the item's preferred list, topped up from the
+category if the list is short 6.4.
+10. RFQ small but never bought
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00050/1
+20261102
+1020
+PUN1 ITM1006 Aluminium plate 6061
+10mm
+220
+KG
+202611
+15
+Normal
+Decision: RFQ · suggested: S003, S002, S005 · requirement value ₹80,300
+Only ₹80,300, but the item has not been bought from an Active supplier in the last 365 days, so there is
+no proven supplier and rule 5.4 does not apply. It goes to quotes 5.5.
+Corvo Engineering · Worked examples · page 3 of 5
+
+--- page 4 ---
+11. RFP
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00100/1
+20261104
+1305
+CHK1 ITM
+1034
+Encoder for CNC spindle
+Vertex)
+50
+NOS
+202611
+24
+Normal
+Decision: RFP · suggested: S020, S017, S019, S018 · requirement value ₹20,70,780
+Worth ₹20,70,780, at or above ₹10 lakh, so a formal RFP with 5 suggested suppliers 5.6.
+12. Capex
+PR / line Created Plant Item code Description Qty Need by Urgency
+PR2600047/1 20261103 1400 PUN1 (none) eot crane 5 ton 4 NOS 20261201 Normal
+Decision: CAPEX_SOURCING · suggested: S045, S047, S020, S048, S046 · requirement value
+₹60,36,704
+Capex items always go to sourcing with 5 suggested suppliers 5.1, checked before contracts and value
+limits.
+13. New item
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR26
+00170/1
+20261105
+1040
+PUN1 (none) Drinking water purifier 50
+LPH
+1
+NOS
+202611
+13
+Normal
+Decision: NEW_ITEM_SOURCING · requirement value ₹1,41,100
+Not in the item master 1.2. Sourcing request, valued at the requester's estimate, never clubbed, and no
+supplier suggestions.
+14. Several requirements on one PO
+PR / line Created Plant Item
+code
+Description Qty Need by Urgency
+PR2600031/1 20261103
+1030
+PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+1140 NOS 20261112 Normal
+PR26
+00035/1
+20261108
+1005
+PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+2150 NOS 20261117 Normal
+PR26
+00034/1
+20261102
+1405
+PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+3920
+NOS
+202611
+25
+Normal
+PR26
+00032/1
+20261109 1810 PUN1 ITM1009 Hex bolt M1040 GR
+8.8
+690 NOS 202611
+29
+Normal
+Decision: CONTRACT_PO · supplier S007 Precision Fasteners Co) at ₹7 · requirement value ₹23,227 ·
+PO0003
+These requirements go to the same supplier, for the same plant and the same route, and were raised
+within 24 hours of the first one, so they are placed as one PO with several lines 7.1.
+Corvo Engineering · Worked examples · page 4 of 5
+
+--- page 5 ---
+Preferred supplier lists
+How Corvo's buyers ranked suppliers for three items, from PO history, contracts and supplier ratings (policy
+6.1 and 6.2. Recency: 1  last PO within 90 days, 0.5  within a year, 0  older. Blocked or Inactive suppliers
+are excluded. Your ranking method is your design: it should produce sensible results like these, and you
+should explain it in DECISIONS.md.
+ITM1048 Nitrile coated gloves (as of 1 Nov 2026
+Rank Supplier Status POs 548 d) Recency Contract On-time Quality
+1 S029 SafeGuard Industrial Supplies Active 7 1.0 yes 81% 3.1
+2 S030 Karam Safety Distributor Active 4 1.0 no 72% 3.4
+excluded S031 Udyogi Safety Dealer Inactive 2 - no 78% 3.4
+ITM1036 Pneumatic cylinder 50100 (as of 1 Nov 2026
+Rank Supplier Status POs 548 d) Recency Contract On-time Quality
+1 S023 Hydrax Hydraulics Active 2 1.0 no 74% 3.9
+2 S022 Fluidline Hydraulics Active 2 0.5 no 77% 3.5
+3 S024 Janatics Dealer Chakan Active 1 0.0 no 89% 4.1
+ITM1016 MIG wire ER70S6 1.2mm (as of 1 Nov 2026
+Rank Supplier Status POs 548 d) Recency Contract On-time Quality
+1 S009 Weldtech Supplies Active 1 0.5 yes 83% 4.6
+2 S010 Inox Gases Dealer Pune Active 1 0.5 no 80% 3.9
+Corvo Engineering · Worked examples · page 5 of 5
